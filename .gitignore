@@ -1,0 +1,31 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+local.properties
+secrets.properties
+
+# Build output
+*.apk
+*.aab
+*.apks
+*.xapk
+build/
+.gradle/
+.gradle-local/
+captures/
+
+# Reverse-engineering artifacts (large generated trees)
+/reverse/
+
+# Local Android SDK (installed by tooling, not part of the repo)
+/.android-sdk/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

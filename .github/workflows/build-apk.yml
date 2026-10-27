@@ -1,0 +1,118 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # AGP finds the SDK through these variables when local.properties is absent,
+  # which is the case in CI (that file is machine-local and git-ignored).
+  ANDROID_HOME: ${{ github.workspace }}/.android-sdk
+  ANDROID_SDK_ROOT: ${{ github.workspace }}/.android-sdk
+  CMDLINE_TOOLS_VERSION: "16111833"
+  # Keep the SDK cache key in sync with what the build actually needs.
+  SDK_PACKAGES: "platform-tools platforms;android-37.0 build-tools;37.0.0"
+
+jobs:
+  build:
+    name: Debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The Android SDK is ~800 MB, so it is cached between runs.
+      - name: Cache Android SDK
+        uses: actions/cache@v4
+        with:
+          path: .android-sdk
+          key: android-sdk-${{ runner.os }}-${{ env.CMDLINE_TOOLS_VERSION }}-${{ hashFiles('.github/workflows/build-apk.yml') }}
+
+      - name: Install Android SDK
+        run: |
+          set -euo pipefail
+          SDK="$ANDROID_HOME"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "Installing Android command-line tools $CMDLINE_TOOLS_VERSION"
+            mkdir -p "$SDK/cmdline-tools"
+            curl -fsSL -o /tmp/cmdline-tools.zip \
+              "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip"
+            unzip -q /tmp/cmdline-tools.zip -d "$SDK/cmdline-tools"
+            rm -rf "$SDK/cmdline-tools/latest"
+            mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+          fi
+
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          # shellcheck disable=SC2086
+          yes | "$SDKMANAGER" $SDK_PACKAGES
+
+      # app/build.gradle.kts reads secrets from this file. The key is passed through
+      # an env var rather than interpolated into the script, so a value containing
+      # shell metacharacters cannot break out of the command.
+      - name: Write .env
+        env:
+          AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
+          AGNES_BASE_URL: ${{ vars.AGNES_BASE_URL || 'https://apihub.agnes-ai.com/v1' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "AGNES_BASE_URL=${AGNES_BASE_URL}"
+            echo "AGNES_API_KEY=${AGNES_API_KEY}"
+          } > .env
+
+          if [ -n "${AGNES_API_KEY}" ]; then
+            echo "### API-Key" >> "$GITHUB_STEP_SUMMARY"
+            echo "Ein \`AGNES_API_KEY\`-Secret ist gesetzt und wird **in das APK eingebettet**." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### API-Key" >> "$GITHUB_STEP_SUMMARY"
+            echo "Kein \`AGNES_API_KEY\`-Secret gesetzt: das APK wird ohne Key gebaut und fragt ihn zur Laufzeit in den Einstellungen ab." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Remove secrets from the workspace
+        if: always()
+        run: rm -f .env
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: openagnes-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 14
